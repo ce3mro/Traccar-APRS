@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # Traccar -> APRS-IS Gateway
-# - SmartBeaconing completo (velocidad + cambio de rumbo)
-# - Beacon al apagar motor
-# - Envia solo posicion nueva
+# SmartBeaconing completo + Beacon al apagar motor
+# Velocidad corregida (Traccar entrega nudos)
 
 import requests
 import socket
 import time
-import math
 
 # ========= TRACCAR =========
 TRACCAR_URL = "http://localhost:8082"
@@ -22,13 +20,15 @@ APRS_CALLSIGN = "AB0XYZ-9"
 APRS_PASSCODE = "12345"
 
 # ========= CONFIG =========
-CHECK_INTERVAL = 10          # segundos
+CHECK_INTERVAL = 10
+
 COMMENT_MOVING = "Vehiculo en movimiento"
 COMMENT_STOPPED = "Motor OFF"
 
-TURN_ANGLE = 30              # grados
-TURN_MIN_SPEED = 10          # km/h
-TURN_MIN_INTERVAL = 15       # segundos
+# SmartBeaconing
+TURN_ANGLE = 30          # grados
+TURN_MIN_SPEED = 10      # km/h
+TURN_MIN_INTERVAL = 15   # segundos
 
 # ========= ESTADO =========
 last_position_id = None
@@ -51,7 +51,7 @@ def lon_aprs(lon):
 def send_aprs(packet):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((APRS_SERVER, APRS_PORT))
-        login = f"user {APRS_CALLSIGN} pass {APRS_PASSCODE} vers Traccar-APRS 3.0\n"
+        login = f"user {APRS_CALLSIGN} pass {APRS_PASSCODE} vers Traccar-APRS 3.1\n"
         s.send(login.encode())
         s.send((packet + "\n").encode())
 
@@ -80,7 +80,7 @@ def send_beacon(pos, comment):
     lat = lat_aprs(pos["latitude"])
     lon = lon_aprs(pos["longitude"])
     course = int(pos.get("course", 0))
-    speed_knots = int(pos.get("speed", 0) * 1.94384)
+    speed_knots = int(pos.get("speed", 0))  # YA viene en nudos
 
     packet = (
         f"{APRS_CALLSIGN}>APRS,TCPIP*:="
@@ -89,44 +89,46 @@ def send_beacon(pos, comment):
         f" {comment}"
     )
 
-    print("Enviando APRS:", packet)
+    print("APRS:", packet)
     send_aprs(packet)
 
 # ========= LOOP PRINCIPAL =========
 
 if __name__ == "__main__":
-    print("Traccar -> APRS-IS con SmartBeaconing avanzado iniciado")
+    print("Traccar -> APRS-IS iniciado (SmartBeaconing completo)")
 
     while True:
         try:
             pos = get_position()
             position_id = pos.get("id")
             ignition = pos.get("attributes", {}).get("ignition", False)
+
             course = int(pos.get("course", 0))
-            speed_kmh = pos.get("speed", 0) * 3.6
+            speed_knots = pos.get("speed", 0)
+            speed_kmh = speed_knots * 1.852
             now = time.time()
 
             # Beacon al apagar motor
             if last_ignition is True and ignition is False:
-                print("Motor apagado, enviando beacon final")
+                print("Motor apagado -> Beacon final")
                 send_beacon(pos, COMMENT_STOPPED)
                 last_position_id = position_id
                 last_ignition = ignition
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # Motor apagado → nada
+            # Motor apagado → no enviar
             if not ignition:
                 last_ignition = ignition
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # Posicion no nueva
+            # Posición sin cambios
             if position_id == last_position_id:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # Cambio de rumbo
+            # SmartBeaconing por cambio de rumbo
             if (
                 last_course is not None
                 and speed_kmh >= TURN_MIN_SPEED
@@ -142,7 +144,7 @@ if __name__ == "__main__":
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # Intervalo por velocidad
+            # SmartBeaconing por velocidad / tiempo
             interval = smartbeacon_interval(speed_kmh)
             if now - last_beacon_time >= interval:
                 send_beacon(pos, COMMENT_MOVING)
